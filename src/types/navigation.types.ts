@@ -1,9 +1,9 @@
 export type RootStackParamList = {
   Home: undefined;
-  Editor: { projectId?: string };
-  Preview: undefined;
+  Editor: { projectId?: string; autoPick?: 'gallery' | 'camera' };
+  Preview: { projectId?: string };
   Projects: undefined;
-  CropScreen: { imageUri: string };
+  CropScreen: { itemId: string; imageUri: string };
 };
 
 export type BottomTabParamList = {

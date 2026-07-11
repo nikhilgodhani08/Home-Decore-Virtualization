@@ -1,16 +1,17 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View, StyleSheet, Image, Dimensions, Text,
   PanResponder, PanResponderGestureState,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useCanvasStore } from '../../../store/canvasStore';
+import { useUIStore } from '../../../store/uiStore';
 import { Colors } from '../../../theme/colors';
 import { Spacing, BorderRadius } from '../../../theme/spacing';
 import { Typography } from '../../../theme/typography';
 import { getItemAtPoint, sortByZIndex } from '../../../utils/canvasUtils';
-import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../../../utils/constants';
-import { CanvasItemRenderer } from './CanvasItem';
+import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../../../constants';
+import { CanvasItemRenderer, ROTATE_HANDLE_GAP } from './CanvasItem';
 import { CanvasItem } from '../../../types/canvas.types';
 
 const { width: SCREEN_W } = Dimensions.get('window');
@@ -21,19 +22,61 @@ const DISPLAY_H = CANVAS_HEIGHT * CANVAS_SCALE;
 // How many SCREEN pixels away from a handle counts as a hit
 const HANDLE_HIT_RADIUS = 24;
 
+// How close (in screen px) a dragged edge/center needs to be to a guide to snap
+const SNAP_PX = 8;
+const SNAP_THRESHOLD = SNAP_PX / CANVAS_SCALE; // canvas-space units
+
+// Collect candidate snap lines (canvas center + every other item's center/edges)
+function getSnapTargets(items: CanvasItem[]) {
+  const xs: number[] = [CANVAS_WIDTH / 2];
+  const ys: number[] = [CANVAS_HEIGHT / 2];
+  items.forEach(it => {
+    const halfW = (it.width * it.scaleX) / 2;
+    const halfH = (it.height * it.scaleY) / 2;
+    xs.push(it.x, it.x - halfW, it.x + halfW);
+    ys.push(it.y, it.y - halfH, it.y + halfH);
+  });
+  return { xs, ys };
+}
+
+// Check the dragged item's center + both edges on one axis against candidate
+// targets; snap the axis value if any of the three lands within threshold.
+function snapAxis(center: number, halfSize: number, targets: number[]): { value: number; guide: number | null } {
+  const candidates = [
+    { pos: center, offset: 0 },
+    { pos: center - halfSize, offset: -halfSize },
+    { pos: center + halfSize, offset: halfSize },
+  ];
+  for (const target of targets) {
+    for (const c of candidates) {
+      if (Math.abs(c.pos - target) <= SNAP_THRESHOLD) {
+        return { value: target - c.offset, guide: target };
+      }
+    }
+  }
+  return { value: center, guide: null };
+}
+
 interface DecorCanvasProps {
   onItemSelect: (id: string | null) => void;
 }
 
-type GestureMode = 'idle' | 'drag' | 'resize' | 'pinch';
+type GestureMode = 'idle' | 'drag' | 'resize' | 'pinch' | 'group-drag' | 'rotate';
 
 export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
   const items = useCanvasStore(s => s.items);
   const roomImageUri = useCanvasStore(s => s.roomImageUri);
   const selectedItemId = useCanvasStore(s => s.selectedItemId);
+  const selectedItemIds = useCanvasStore(s => s.selectedItemIds);
   const updateItem = useCanvasStore(s => s.updateItem);
+  const moveItemsBy = useCanvasStore(s => s.moveItemsBy);
+  const toggleMultiSelect = useCanvasStore(s => s.toggleMultiSelect);
   const pushHistory = useCanvasStore(s => s.pushHistory);
   const showGuides = useCanvasStore(s => s.showGuides);
+  const isMultiSelectMode = useUIStore(s => s.isMultiSelectMode);
+
+  // Active snap guide lines (canvas-space coords), shown only while dragging
+  const [activeGuides, setActiveGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
 
   // Gesture state refs (no re-render overhead)
   const mode = useRef<GestureMode>('idle');
@@ -51,6 +94,14 @@ export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
   const initialItemH = useRef(0);  // item.height * scaleY in canvas units
   const initialDistFromCenter = useRef(1); // screen pixels
   const initialPinchDist = useRef(1); // screen pixels for 2-finger zoom
+  const initialPinchAngle = useRef(0); // degrees, for 2-finger rotate
+  const initialRotation = useRef(0); // item.rotation at pinch/rotate start
+  const rotateStartAngle = useRef(0); // center→touch angle at rotate-handle grab
+
+  // Group-drag refs (multi-select mode)
+  const groupDragIds = useRef<string[]>([]);
+  const lastGroupDx = useRef(0);
+  const lastGroupDy = useRef(0);
 
   // Tap detection
   const tapX = useRef(0);
@@ -85,6 +136,19 @@ export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
     );
   };
 
+  // ── Helper: check if screen point is near the rotation handle ───────────
+  const getHitRotateHandle = (sx: number, sy: number, item: CanvasItem): boolean => {
+    const halfH = (item.height * item.scaleY * CANVAS_SCALE) / 2;
+    const cx = item.x * CANVAS_SCALE;
+    const cy = item.y * CANVAS_SCALE;
+    const rad = (item.rotation * Math.PI) / 180;
+    const dist = halfH + ROTATE_HANDLE_GAP;
+    // Handle sits above the top-center, rotated around the item's center
+    const hx = cx + dist * Math.sin(rad);
+    const hy = cy - dist * Math.cos(rad);
+    return Math.hypot(sx - hx, sy - hy) <= HANDLE_HIT_RADIUS;
+  };
+
   // ── PanResponder ────────────────────────────────────────────────────────
   const panResponder = useRef(
     PanResponder.create({
@@ -105,7 +169,20 @@ export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
         const currentSelectedId = useCanvasStore.getState().selectedItemId;
         const selectedItem = currentItems.find(i => i.id === currentSelectedId);
 
-        // 1️⃣ Check if touching a corner handle of the selected item
+        // 1️⃣ Check if touching the rotation handle of the selected item
+        if (selectedItem && !selectedItem.isLocked) {
+          if (getHitRotateHandle(locationX, locationY, selectedItem)) {
+            mode.current = 'rotate';
+            activeId.current = selectedItem.id;
+            const cx = selectedItem.x * CANVAS_SCALE;
+            const cy = selectedItem.y * CANVAS_SCALE;
+            initialRotation.current = selectedItem.rotation;
+            rotateStartAngle.current = Math.atan2(locationY - cy, locationX - cx) * (180 / Math.PI);
+            return;
+          }
+        }
+
+        // 2️⃣ Check if touching a corner handle of the selected item
         if (selectedItem && !selectedItem.isLocked) {
           if (getHitHandle(locationX, locationY, selectedItem)) {
             mode.current = 'resize';
@@ -124,9 +201,19 @@ export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
           }
         }
 
-        // 2️⃣ Check if touching an item body → drag
+        // 2️⃣ Check if touching an item that's part of the active multi-selection → move the whole group
         const { x, y } = toCanvas(locationX, locationY);
         const hit = getItemAtPoint(currentItems, x, y);
+        const currentSelectedIds = useCanvasStore.getState().selectedItemIds;
+        if (isMultiSelectMode && currentSelectedIds.length > 0 && hit && currentSelectedIds.includes(hit.id) && !hit.isLocked) {
+          mode.current = 'group-drag';
+          groupDragIds.current = currentSelectedIds;
+          lastGroupDx.current = 0;
+          lastGroupDy.current = 0;
+          return;
+        }
+
+        // 3️⃣ Otherwise, touching an item body → single drag
         if (hit && !hit.isLocked) {
           mode.current = 'drag';
           activeId.current = hit.id;
@@ -139,26 +226,31 @@ export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
         const touches = e.nativeEvent.touches;
 
         if (touches.length >= 2 && activeId.current) {
-          // ── Pinch to zoom ───────────────────────────────────────────────
+          // ── Pinch to zoom + rotate ───────────────────────────────────────
           const dx = touches[0].pageX - touches[1].pageX;
           const dy = touches[0].pageY - touches[1].pageY;
           const currentDist = Math.hypot(dx, dy) || 1;
+          const currentAngle = Math.atan2(dy, dx) * (180 / Math.PI);
 
           if (mode.current !== 'pinch') {
             mode.current = 'pinch';
             initialPinchDist.current = currentDist;
+            initialPinchAngle.current = currentAngle;
 
             const currentItems = useCanvasStore.getState().items;
             const item = currentItems.find(i => i.id === activeId.current);
             if (item) {
               initialScaleX.current = item.scaleX;
               initialScaleY.current = item.scaleY;
+              initialRotation.current = item.rotation;
             }
           } else {
             const ratio = currentDist / initialPinchDist.current;
             const newScaleX = Math.max(0.1, Math.min(5, initialScaleX.current * ratio));
             const newScaleY = Math.max(0.1, Math.min(5, initialScaleY.current * ratio));
-            updateItem(activeId.current, { scaleX: newScaleX, scaleY: newScaleY });
+            const angleDelta = currentAngle - initialPinchAngle.current;
+            const newRotation = ((initialRotation.current + angleDelta) % 360 + 360) % 360;
+            updateItem(activeId.current, { scaleX: newScaleX, scaleY: newScaleY, rotation: newRotation });
           }
 
           if (!interactionStarted.current) {
@@ -170,17 +262,51 @@ export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
 
         if (!interactionStarted.current && (Math.abs(gs.dx) > 3 || Math.abs(gs.dy) > 3)) {
           interactionStarted.current = true;
-          onItemSelect(null);
+          // Only dragging the item body should collapse the selection UI;
+          // resize/rotate keep the item selected so their handles stay visible.
+          if (mode.current === 'drag') onItemSelect(null);
         }
 
-        if (mode.current === 'drag' && activeId.current) {
+        if (mode.current === 'rotate' && activeId.current) {
+          // ── Rotate: angle of center→touch, offset by the grab angle ──────
+          const { locationX, locationY } = e.nativeEvent;
+          const currentItems = useCanvasStore.getState().items;
+          const item = currentItems.find(i => i.id === activeId.current);
+          if (item) {
+            const cx = item.x * CANVAS_SCALE;
+            const cy = item.y * CANVAS_SCALE;
+            const currentAngle = Math.atan2(locationY - cy, locationX - cx) * (180 / Math.PI);
+            const delta = currentAngle - rotateStartAngle.current;
+            const newRotation = (((initialRotation.current + delta) % 360) + 360) % 360;
+            updateItem(activeId.current, { rotation: newRotation });
+          }
+        } else if (mode.current === 'drag' && activeId.current) {
           // ── Drag: use total delta from gesture start ──────────────────
-          const newX = itemStartX.current + gs.dx / CANVAS_SCALE;
-          const newY = itemStartY.current + gs.dy / CANVAS_SCALE;
-          updateItem(activeId.current, {
-            x: Math.max(0, Math.min(CANVAS_WIDTH, newX)),
-            y: Math.max(0, Math.min(CANVAS_HEIGHT, newY)),
-          });
+          const rawX = itemStartX.current + gs.dx / CANVAS_SCALE;
+          const rawY = itemStartY.current + gs.dy / CANVAS_SCALE;
+          const clampedX = Math.max(0, Math.min(CANVAS_WIDTH, rawX));
+          const clampedY = Math.max(0, Math.min(CANVAS_HEIGHT, rawY));
+
+          const currentItems = useCanvasStore.getState().items;
+          const activeItem = currentItems.find(i => i.id === activeId.current);
+          const others = currentItems.filter(i => i.id !== activeId.current);
+          const halfW = activeItem ? (activeItem.width * activeItem.scaleX) / 2 : 0;
+          const halfH = activeItem ? (activeItem.height * activeItem.scaleY) / 2 : 0;
+          const { xs, ys } = getSnapTargets(others);
+
+          const snapX = snapAxis(clampedX, halfW, xs);
+          const snapY = snapAxis(clampedY, halfH, ys);
+
+          updateItem(activeId.current, { x: snapX.value, y: snapY.value });
+          setActiveGuides({ x: snapX.guide, y: snapY.guide });
+
+        } else if (mode.current === 'group-drag' && groupDragIds.current.length > 0) {
+          // ── Group drag: apply the incremental screen delta to every selected item ──
+          const dxDelta = (gs.dx - lastGroupDx.current) / CANVAS_SCALE;
+          const dyDelta = (gs.dy - lastGroupDy.current) / CANVAS_SCALE;
+          lastGroupDx.current = gs.dx;
+          lastGroupDy.current = gs.dy;
+          moveItemsBy(groupDragIds.current, dxDelta, dyDelta);
 
         } else if (mode.current === 'resize' && activeId.current) {
           // ── Resize: scale based on distance from item centre ──────────
@@ -212,14 +338,24 @@ export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
           Math.abs(locationY - tapY.current) > 8;
 
         if (!movedFar && elapsed < 350) {
-          // Pure tap → select / deselect
+          // Pure tap → select / deselect (or toggle membership, in multi-select mode)
           const { x, y } = toCanvas(locationX, locationY);
           const currentItems = useCanvasStore.getState().items;
           const hit = getItemAtPoint(currentItems, x, y);
-          onItemSelect(hit?.id ?? null);
+          if (isMultiSelectMode) {
+            if (hit) toggleMultiSelect(hit.id);
+          } else {
+            onItemSelect(hit?.id ?? null);
+          }
+        } else if (mode.current === 'group-drag' && groupDragIds.current.length > 0) {
+          pushHistory();
         } else {
-          // It was a drag, resize, or pinch
-          if ((mode.current === 'drag' || mode.current === 'resize' || mode.current === 'pinch') && activeId.current) {
+          // It was a drag, resize, pinch, or rotate
+          if (
+            (mode.current === 'drag' || mode.current === 'resize' ||
+              mode.current === 'pinch' || mode.current === 'rotate') &&
+            activeId.current
+          ) {
             pushHistory();
             // We intentionally DO NOT call onItemSelect here.
             // Dragging an unselected item should not pop open the drawer.
@@ -228,11 +364,15 @@ export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
 
         mode.current = 'idle';
         activeId.current = null;
+        groupDragIds.current = [];
+        setActiveGuides({ x: null, y: null });
       },
 
       onPanResponderTerminate: () => {
         mode.current = 'idle';
         activeId.current = null;
+        groupDragIds.current = [];
+        setActiveGuides({ x: null, y: null });
       },
     })
   ).current;
@@ -263,11 +403,15 @@ export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
           </View>
         )}
 
-        {/* Alignment guides */}
-        {showGuides && selectedItemId && (
+        {/* Smart snap guides — only shown for the axis currently snapped while dragging */}
+        {showGuides && (activeGuides.x !== null || activeGuides.y !== null) && (
           <View pointerEvents="none" style={StyleSheet.absoluteFillObject}>
-            <View style={[styles.guideLine, styles.guideH, { top: DISPLAY_H / 2 }]} />
-            <View style={[styles.guideLine, styles.guideV, { left: DISPLAY_W / 2 }]} />
+            {activeGuides.y !== null && (
+              <View style={[styles.guideLine, styles.guideH, { top: activeGuides.y * CANVAS_SCALE }]} />
+            )}
+            {activeGuides.x !== null && (
+              <View style={[styles.guideLine, styles.guideV, { left: activeGuides.x * CANVAS_SCALE }]} />
+            )}
           </View>
         )}
 
@@ -277,7 +421,7 @@ export const DecorCanvas: React.FC<DecorCanvasProps> = ({ onItemSelect }) => {
             key={item.id}
             item={item}
             scale={CANVAS_SCALE}
-            isSelected={item.id === selectedItemId}
+            isSelected={isMultiSelectMode ? selectedItemIds.includes(item.id) : item.id === selectedItemId}
           />
         ))}
 

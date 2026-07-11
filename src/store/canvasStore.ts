@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { CanvasItem, CanvasSnapshot } from '../types/canvas.types';
-import { HISTORY_LIMIT } from '../utils/constants';
+import { HISTORY_LIMIT } from '../constants';
+import { clearDraft } from '../utils/storageManager';
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -50,6 +51,7 @@ function duplicateItem(item: CanvasItem): CanvasItem {
     id: `${item.id}_copy_${Date.now()}`,
     x: item.x + 20,
     y: item.y + 20,
+    isProcessing: false,
   };
 }
 
@@ -59,6 +61,7 @@ interface CanvasStore {
   roomImageUri: string | null;
   items: CanvasItem[];
   selectedItemId: string | null;
+  selectedItemIds: string[];   // multi-select set; when non-empty, selectedItemId is null
   undoStack: CanvasSnapshot[];
   redoStack: CanvasSnapshot[];
   snapToGrid: boolean;
@@ -76,6 +79,9 @@ interface CanvasStore {
   addItem: (item: CanvasItem) => void;
   updateItem: (id: string, changes: Partial<CanvasItem>) => void;
   deleteItem: (id: string) => void;
+  deleteItems: (ids: string[]) => void;
+  duplicateItems: (ids: string[]) => void;
+  moveItemsBy: (ids: string[], dx: number, dy: number) => void;
   deleteSelected: () => void;
   duplicateSelected: () => void;
   clearCanvas: () => void;
@@ -83,6 +89,8 @@ interface CanvasStore {
 
   // Selection
   selectItem: (id: string | null) => void;
+  toggleMultiSelect: (id: string) => void;
+  clearMultiSelect: () => void;
 
   // Layers
   bringForward: () => void;
@@ -108,6 +116,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   roomImageUri: null,
   items: [],
   selectedItemId: null,
+  selectedItemIds: [],
   undoStack: [],
   redoStack: [],
   snapToGrid: false,
@@ -148,28 +157,73 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     }));
   },
 
+  deleteItems: (ids) => {
+    get().pushHistory();
+    set(state => ({
+      items: state.items.filter(i => !ids.includes(i.id)),
+      selectedItemIds: [],
+      selectedItemId: state.selectedItemId && ids.includes(state.selectedItemId) ? null : state.selectedItemId,
+    }));
+  },
+
+  duplicateItems: (ids) => {
+    const { items } = get();
+    const toDuplicate = items.filter(i => ids.includes(i.id));
+    if (toDuplicate.length === 0) return;
+    get().pushHistory();
+    const duplicates = toDuplicate.map(duplicateItem);
+    set(state => ({
+      items: normalizeZIndexes([...state.items, ...duplicates]),
+      selectedItemIds: duplicates.map(d => d.id),
+      selectedItemId: null,
+    }));
+  },
+
+  moveItemsBy: (ids, dx, dy) => {
+    set(state => ({
+      items: state.items.map(i => (ids.includes(i.id) ? { ...i, x: i.x + dx, y: i.y + dy } : i)),
+    }));
+  },
+
   deleteSelected: () => {
-    const { selectedItemId, deleteItem } = get();
+    const { selectedItemId, selectedItemIds, deleteItem, deleteItems } = get();
+    if (selectedItemIds.length > 0) {
+      deleteItems(selectedItemIds);
+      return;
+    }
     if (selectedItemId) deleteItem(selectedItemId);
   },
 
   duplicateSelected: () => {
-    const { selectedItemId, items, addItem } = get();
+    const { selectedItemId, selectedItemIds, items, addItem, duplicateItems } = get();
+    if (selectedItemIds.length > 0) {
+      duplicateItems(selectedItemIds);
+      return;
+    }
     const item = items.find(i => i.id === selectedItemId);
     if (item) addItem(duplicateItem(item));
   },
 
   clearCanvas: () => {
     get().pushHistory();
-    set({ items: [], selectedItemId: null, roomImageUri: null });
+    set({ items: [], selectedItemId: null, selectedItemIds: [], roomImageUri: null });
+    clearDraft();
   },
 
   clearItems: () => {
     get().pushHistory();
-    set({ items: [], selectedItemId: null });
+    set({ items: [], selectedItemId: null, selectedItemIds: [] });
   },
 
-  selectItem: (id) => set({ selectedItemId: id }),
+  selectItem: (id) => set({ selectedItemId: id, selectedItemIds: [] }),
+
+  toggleMultiSelect: (id) => set(state => {
+    const exists = state.selectedItemIds.includes(id);
+    const next = exists ? state.selectedItemIds.filter(i => i !== id) : [...state.selectedItemIds, id];
+    return { selectedItemIds: next, selectedItemId: null };
+  }),
+
+  clearMultiSelect: () => set({ selectedItemIds: [] }),
 
   bringForward: () => {
     const { selectedItemId, items } = get();
@@ -223,6 +277,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
       undoStack: undoStack.slice(0, -1),
       redoStack: [...redoStack, currentSnapshot].slice(-HISTORY_LIMIT),
       selectedItemId: null,
+      selectedItemIds: [],
     });
   },
 
@@ -240,6 +295,7 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
       redoStack: redoStack.slice(0, -1),
       undoStack: [...undoStack, currentSnapshot].slice(-HISTORY_LIMIT),
       selectedItemId: null,
+      selectedItemIds: [],
     });
   },
 
@@ -248,6 +304,6 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
   setExporting: (v) => set({ isExporting: v }),
 
   loadCanvas: (items, roomImageUri) => {
-    set({ items, roomImageUri, selectedItemId: null, undoStack: [], redoStack: [] });
+    set({ items, roomImageUri, selectedItemId: null, selectedItemIds: [], undoStack: [], redoStack: [] });
   },
 }));

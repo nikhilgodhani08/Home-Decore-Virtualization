@@ -15,12 +15,22 @@ export interface CanvasItem {
   isLocked: boolean;
   isFlippedH: boolean;
   isFlippedV: boolean;
+  isProcessing?: boolean;   // background removal running on this item
 }
 
 // Snapshot for undo/redo
 export interface CanvasSnapshot {
   items: CanvasItem[];
   roomImageUri: string | null;
+}
+
+// Autosaved in-progress canvas, distinct from an explicitly saved Project
+export interface CanvasDraft {
+  items: CanvasItem[];
+  roomImageUri: string | null;
+  projectId: string | null;   // set when the draft belongs to an already-saved project
+  projectName: string;
+  updatedAt: number;
 }
 
 // Saved project

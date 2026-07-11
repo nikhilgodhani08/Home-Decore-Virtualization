@@ -8,8 +8,7 @@ import { Colors } from '../../theme/colors';
 import { Typography } from '../../theme/typography';
 import { Spacing, Shadow } from '../../theme/spacing';
 
-const APP_NAME = 'Bapasitaram home decore & gift';
-const CREATOR = 'Created by Parth Godhani';
+const APP_NAME = 'Home Decor Visualization';
 
 interface SplashScreenProps {
   onFinish: () => void;
@@ -20,7 +19,6 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish }) => {
   const logoOpacity = useRef(new Animated.Value(0)).current;
   const nameOpacity = useRef(new Animated.Value(0)).current;
   const nameSlide = useRef(new Animated.Value(20)).current;
-  const creatorOpacity = useRef(new Animated.Value(0)).current;
   const shimmer = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -44,11 +42,8 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish }) => {
         Animated.timing(nameOpacity, { toValue: 1, duration: 500, useNativeDriver: true }),
         Animated.spring(nameSlide, { toValue: 0, tension: 60, friction: 8, useNativeDriver: true }),
       ]),
-      Animated.delay(300),
-      // Creator fades in
-      Animated.timing(creatorOpacity, { toValue: 1, duration: 500, useNativeDriver: true }),
       // Hold for a moment
-      Animated.delay(900),
+      Animated.delay(1200),
     ]).start(onFinish);
   }, []);
 
@@ -56,10 +51,10 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish }) => {
 
   return (
     <View style={styles.root}>
-      <StatusBar barStyle="light-content" backgroundColor="#0F0F1A" />
+      <StatusBar barStyle="light-content" backgroundColor={Colors.bgDark} />
 
       <LinearGradient
-        colors={['#0F0F1A', '#1A1A2E', '#0D1B3E']}
+        colors={[Colors.gradientStart, Colors.gradientMid, Colors.gradientEnd]}
         style={StyleSheet.absoluteFillObject}
         start={{ x: 0.2, y: 0 }} end={{ x: 0.8, y: 1 }}
       />
@@ -91,11 +86,6 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish }) => {
       ]}>
         <Text style={styles.appName}>{APP_NAME}</Text>
         <View style={styles.divider} />
-      </Animated.View>
-
-      {/* Creator */}
-      <Animated.View style={[styles.creatorBlock, { opacity: creatorOpacity }]}>
-        <Text style={styles.creatorText}>{CREATOR}</Text>
       </Animated.View>
 
       {/* Bottom dots */}
@@ -158,12 +148,11 @@ const styles = StyleSheet.create({
 
   nameBlock: { alignItems: 'center', marginBottom: 24 },
   appName: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: Colors.white,
+    ...Typography.h2,
+    fontSize: 26,
+    lineHeight: 36,
+    color: Colors.textPrimaryDark,
     textAlign: 'center',
-    letterSpacing: 0.3,
-    lineHeight: 32,
   },
   divider: {
     marginTop: 12,
@@ -171,13 +160,6 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: Colors.primary,
     opacity: 0.8,
-  },
-
-  creatorBlock: { alignItems: 'center', marginBottom: 60 },
-  creatorText: {
-    ...Typography.bodyMedium,
-    color: Colors.primary,
-    letterSpacing: 0.5,
   },
 
   dotsRow: {

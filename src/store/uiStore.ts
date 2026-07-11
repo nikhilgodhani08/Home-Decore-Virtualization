@@ -11,6 +11,7 @@ interface UIStore {
   isExportDialogOpen: boolean;
   isDeleteConfirmOpen: boolean;
   activeProjectId: string | null;
+  isMultiSelectMode: boolean;
 
   // Drawer
   openDrawer: () => void;
@@ -39,6 +40,10 @@ interface UIStore {
 
   // Project
   setActiveProjectId: (id: string | null) => void;
+
+  // Multi-select mode
+  toggleMultiSelectMode: () => void;
+  setMultiSelectMode: (v: boolean) => void;
 }
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -52,6 +57,7 @@ export const useUIStore = create<UIStore>((set) => ({
   isExportDialogOpen: false,
   isDeleteConfirmOpen: false,
   activeProjectId: null,
+  isMultiSelectMode: false,
 
   openDrawer: () => set({ isDrawerOpen: true }),
   closeDrawer: () => set({ isDrawerOpen: false }),
@@ -75,4 +81,7 @@ export const useUIStore = create<UIStore>((set) => ({
   closeDeleteConfirm: () => set({ isDeleteConfirmOpen: false }),
 
   setActiveProjectId: (id) => set({ activeProjectId: id }),
+
+  toggleMultiSelectMode: () => set(s => ({ isMultiSelectMode: !s.isMultiSelectMode })),
+  setMultiSelectMode: (v) => set({ isMultiSelectMode: v }),
 }));

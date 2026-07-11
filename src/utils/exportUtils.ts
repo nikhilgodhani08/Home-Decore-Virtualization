@@ -1,5 +1,5 @@
 import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system';
+import * as LegacyFileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 
 /**
@@ -14,16 +14,17 @@ export const saveImageToGallery = async (uri: string): Promise<boolean> => {
     const { status } = await MediaLibrary.requestPermissionsAsync();
 
     if (status !== 'granted') {
-      console.warn('[Export] Permission not granted');
       return false;
     }
 
-    const asset = await MediaLibrary.createAssetAsync(uri);
-    await MediaLibrary.createAlbumAsync('HomeDecore', asset, false);
+    // Just create the asset in the gallery. We intentionally do NOT move it into
+    // a custom album with createAlbumAsync(..., copyAsset=false), because moving
+    // an existing asset triggers Android's per-photo "allow this app to modify
+    // this photo?" confirmation on every save.
+    await MediaLibrary.createAssetAsync(uri);
 
     return true;
-  } catch (e) {
-    console.error('[Export] saveImageToGallery error:', e);
+  } catch {
     return false;
   }
 };
@@ -36,23 +37,37 @@ export const shareImage = async (uri: string): Promise<void> => {
       mimeType: 'image/png',
       dialogTitle: 'Share your design',
     });
-  } catch (e) {
-    console.error('[Export] shareImage error:', e);
+  } catch {
+    // Sharing was cancelled or failed silently; caller's snackbar covers this.
   }
 };
 
 export const deleteTemporaryFile = async (uri: string): Promise<void> => {
   try {
-    const info = await FileSystem.getInfoAsync(uri);
+    const info = await LegacyFileSystem.getInfoAsync(uri);
     if (info.exists) {
-      await FileSystem.deleteAsync(uri, { idempotent: true });
+      await LegacyFileSystem.deleteAsync(uri, { idempotent: true });
     }
   } catch { }
 };
 
-export const generateThumbnailPath = (): string => {
-  const base = (FileSystem as any).cacheDirectory
-    ?? (FileSystem as any).documentDirectory
-    ?? '';
-  return `${base}thumb_${Date.now()}.png`;
+// Persistent folder for project thumbnails. Using documentDirectory (app data)
+// rather than the cache means previews survive OS cache eviction and app
+// reinstalls, so saved designs keep their thumbnails instead of going blank.
+const THUMBNAIL_DIR = `${LegacyFileSystem.documentDirectory}thumbnails/`;
+
+const ensureThumbnailDir = async (): Promise<void> => {
+  const info = await LegacyFileSystem.getInfoAsync(THUMBNAIL_DIR);
+  if (!info.exists) {
+    await LegacyFileSystem.makeDirectoryAsync(THUMBNAIL_DIR, { intermediates: true });
+  }
+};
+
+// Copy a captured (often temporary) snapshot into persistent storage so it
+// survives beyond the ViewShot capture's own lifetime.
+export const persistThumbnail = async (sourceUri: string): Promise<string> => {
+  await ensureThumbnailDir();
+  const dest = `${THUMBNAIL_DIR}thumb_${Date.now()}.png`;
+  await LegacyFileSystem.copyAsync({ from: sourceUri, to: dest });
+  return dest;
 };

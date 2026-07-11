@@ -1,15 +1,14 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Modal,
-  TextInput, Dimensions, Animated, Alert, ScrollView, Image,
-  ActivityIndicator,
+  Animated, AppState, AppStateStatus,
 } from 'react-native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RouteProp } from '@react-navigation/native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import { LinearGradient } from 'expo-linear-gradient';
+import ViewShot from 'react-native-view-shot';
 
 import { RootStackParamList } from '../../types/navigation.types';
 import { Colors } from '../../theme/colors';
@@ -19,16 +18,19 @@ import { useCanvasStore } from '../../store/canvasStore';
 import { useUIStore } from '../../store/uiStore';
 import { DecorCanvas } from './canvas/DecorCanvas';
 import { SnackbarNotification } from '../../components/SnackbarNotification';
+import { IconButton } from '../../components/common/IconButton';
+import { GradientButton } from '../../components/common/GradientButton';
+import { OutlineButton } from '../../components/common/OutlineButton';
 import { useProjectStore } from '../../store/projectStore';
-import { CanvasItem } from '../../types/canvas.types';
-import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../../utils/constants';
+import { CanvasItem, Project } from '../../types/canvas.types';
+import { CANVAS_WIDTH, CANVAS_HEIGHT, AUTOSAVE_DEBOUNCE_MS } from '../../constants';
 import {
   removeBackgroundLocal,
   removeBackgroundClipdrop,
 } from '../../utils/backgroundRemoval';
-import { AppFooter } from '../../components/AppFooter';
-
-const { height: SCREEN_H } = Dimensions.get('window');
+import { persistThumbnail, deleteTemporaryFile } from '../../utils/exportUtils';
+import { saveDraft, clearDraft } from '../../utils/storageManager';
+import { generateDesignName } from '../../utils/naming';
 
 type Props = {
   navigation: NativeStackNavigationProp<RootStackParamList, 'Editor'>;
@@ -41,6 +43,7 @@ const EditorScreen: React.FC<Props> = ({ navigation, route }) => {
   // Canvas store
   const items = useCanvasStore(s => s.items);
   const selectedItemId = useCanvasStore(s => s.selectedItemId);
+  const selectedItemIds = useCanvasStore(s => s.selectedItemIds);
   const undoStack = useCanvasStore(s => s.undoStack);
   const redoStack = useCanvasStore(s => s.redoStack);
   const roomImageUri = useCanvasStore(s => s.roomImageUri);
@@ -53,41 +56,86 @@ const EditorScreen: React.FC<Props> = ({ navigation, route }) => {
   const redo = useCanvasStore(s => s.redo);
   const selectItem = useCanvasStore(s => s.selectItem);
   const selectedItem = useCanvasStore(s => s.selectedItem());
-  const bringForward = useCanvasStore(s => s.bringForward);
-  const sendBackward = useCanvasStore(s => s.sendBackward);
 
   // UI store
   const showSnackbar = useUIStore(s => s.showSnackbar);
 
+  const handleGroupDelete = () => {
+    deleteSelected();
+  };
+
   // Project
   const { saveProject } = useProjectStore();
+  const canvasViewRef = useRef<ViewShot>(null);
 
-  const [saveDialogVisible, setSaveDialogVisible] = useState(false);
-  const [projectName, setProjectName] = useState('My Design');
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(route.params?.projectId ?? null);
+  const [saving, setSaving] = useState(false);
+  const [projectName] = useState(() => {
+    const existing = route.params?.projectId
+      ? useProjectStore.getState().getProjectById(route.params.projectId)
+      : undefined;
+    if (existing?.name) return existing.name;
+    // Friendly auto-generated name for a brand-new design (user can rename in Preview)
+    return generateDesignName();
+  });
   const [propertiesOpen, setPropertiesOpen] = useState(false);
   const panelAnim = useRef(new Animated.Value(0)).current;
 
-  // Background removal state
-  const [bgRemoving, setBgRemoving] = useState<'normal' | 'advanced' | null>(null);
+  // Bottom source-picker sheet: which target it applies to
+  const [pickerFor, setPickerFor] = useState<'room' | 'decor' | null>(null);
 
-  const PANEL_H = SCREEN_H * 0.5;
+  const handlePickSource = (source: 'camera' | 'gallery') => {
+    const target = pickerFor;
+    setPickerFor(null);
+    if (target === 'decor') {
+      source === 'camera' ? addDecorFromCamera() : addDecorFromGallery();
+    } else if (target === 'room') {
+      source === 'camera' ? handleChangeRoomFromCamera() : handleChangeRoomFromGallery();
+    }
+  };
 
-  // Open properties when item selected
+  // Open the compact action bar when an item is selected
   useEffect(() => {
     if (selectedItemId) {
       setPropertiesOpen(true);
-      Animated.spring(panelAnim, { toValue: 1, tension: 120, friction: 14, useNativeDriver: false }).start();
+      Animated.spring(panelAnim, { toValue: 1, tension: 140, friction: 16, useNativeDriver: true }).start();
     } else {
-      Animated.timing(panelAnim, { toValue: 0, duration: 200, useNativeDriver: false }).start(() => {
+      Animated.timing(panelAnim, { toValue: 0, duration: 160, useNativeDriver: true }).start(() => {
         setPropertiesOpen(false);
       });
     }
   }, [selectedItemId]);
 
-  const panelHeight = panelAnim.interpolate({
+  const barTranslate = panelAnim.interpolate({
     inputRange: [0, 1],
-    outputRange: [0, PANEL_H],
+    outputRange: [16, 0],
   });
+
+  // ── Autosave draft ─────────────────────────────────────────────────────────
+  const hasContent = items.length > 0 || !!roomImageUri;
+  // Snapshot of the as-loaded (or last explicitly saved) state — only autosave
+  // once the canvas actually diverges from this, so merely opening an
+  // unmodified project doesn't surface a false "unsaved changes" draft.
+  const baselineRef = useRef(JSON.stringify({ items, roomImageUri }));
+  const isDirty = JSON.stringify({ items, roomImageUri }) !== baselineRef.current;
+
+  useEffect(() => {
+    if (!hasContent || !isDirty) return;
+    const timer = setTimeout(() => {
+      saveDraft({ items, roomImageUri, projectId: currentProjectId, projectName, updatedAt: Date.now() });
+    }, AUTOSAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [items, roomImageUri, currentProjectId, projectName, hasContent, isDirty]);
+
+  // Flush immediately when backgrounded so a killed app doesn't lose recent edits
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state: AppStateStatus) => {
+      if (state !== 'active' && hasContent && isDirty) {
+        saveDraft({ items, roomImageUri, projectId: currentProjectId, projectName, updatedAt: Date.now() });
+      }
+    });
+    return () => sub.remove();
+  }, [items, roomImageUri, currentProjectId, projectName, hasContent, isDirty]);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -154,7 +202,9 @@ const EditorScreen: React.FC<Props> = ({ navigation, route }) => {
       isFlippedV: false,
     };
     addItem(newItem);
-    showSnackbar('Decor item added! Drag to position it.', 'success');
+    // Auto-remove the background so the item drops onto the room instantly.
+    // Silent on failure (e.g. unsupported device) — the original photo just stays as-is.
+    runBackgroundRemoval(newItem.id, 'normal');
   };
 
   const handleChangeRoomFromGallery = async () => {
@@ -174,33 +224,70 @@ const EditorScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
+  // Launch the requested picker as soon as the Editor mounts, so the user goes
+  // straight from Home into this screen instead of flashing back to Home while
+  // the native picker resolves.
+  const hasAutoPicked = useRef(false);
+  useEffect(() => {
+    if (hasAutoPicked.current || !route.params?.autoPick) return;
+    hasAutoPicked.current = true;
+    if (route.params.autoPick === 'gallery') {
+      handleChangeRoomFromGallery();
+    } else {
+      handleChangeRoomFromCamera();
+    }
+  }, []);
+
   const handleDelete = () => {
-    Alert.alert('Delete Item', 'Remove this decor item from the canvas?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete', style: 'destructive',
-        onPress: () => { deleteSelected(); selectItem(null); },
-      },
-    ]);
+    deleteSelected();
+    selectItem(null);
   };
 
-  const handleSave = async () => {
-    setSaveDialogVisible(false);
+  const handleSaveAndPreview = async () => {
+    if (saving) return;
+    setSaving(true);
+    // Deselect so the captured thumbnail is clean (no selection outline/handles),
+    // and give the canvas a frame to re-render before capturing.
+    selectItem(null);
+    await new Promise(resolve => setTimeout(resolve, 80));
     try {
-      const project = {
-        id: `proj_${Date.now()}`,
+      const existing = currentProjectId
+        ? useProjectStore.getState().getProjectById(currentProjectId)
+        : undefined;
+
+      let thumbnailUri: string | null = existing?.thumbnailUri ?? null;
+      if (canvasViewRef.current?.capture) {
+        try {
+          const captured = await canvasViewRef.current.capture();
+          thumbnailUri = await persistThumbnail(captured);
+          if (existing?.thumbnailUri) {
+            deleteTemporaryFile(existing.thumbnailUri);
+          }
+        } catch {
+          // Keep the previous thumbnail (or none) if capture fails.
+        }
+      }
+
+      const projectId = currentProjectId ?? `proj_${Date.now()}`;
+      const project: Project = {
+        id: projectId,
         name: projectName,
-        thumbnailUri: null,
+        thumbnailUri,
         roomImageUri,
         canvasJSON: JSON.stringify(items),
-        createdAt: Date.now(),
+        createdAt: existing?.createdAt ?? Date.now(),
         updatedAt: Date.now(),
         itemCount: items.length,
       };
       await saveProject(project);
-      showSnackbar('Design saved!', 'success');
+      setCurrentProjectId(projectId);
+      clearDraft();
+      baselineRef.current = JSON.stringify({ items, roomImageUri });
+      navigation.navigate('Preview', { projectId });
     } catch {
       showSnackbar('Save failed', 'error');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -210,332 +297,194 @@ const EditorScreen: React.FC<Props> = ({ navigation, route }) => {
 
   // ── Background Removal Handlers ────────────────────────────────────────────
 
-  const handleRemoveBackground = async (mode: 'normal' | 'advanced') => {
-    if (!selectedItem) return;
-    setBgRemoving(mode);
+  const runBackgroundRemoval = useCallback(async (itemId: string, mode: 'normal' | 'advanced'): Promise<boolean> => {
+    const item = useCanvasStore.getState().items.find(i => i.id === itemId);
+    if (!item) return false;
+    updateItem(itemId, { isProcessing: true });
     try {
-      let resultUri: string;
-      if (mode === 'normal') {
-        resultUri = await removeBackgroundLocal(selectedItem.imageUri);
-      } else {
-        resultUri = await removeBackgroundClipdrop(selectedItem.imageUri);
-      }
+      const resultUri = mode === 'normal'
+        ? await removeBackgroundLocal(item.imageUri)
+        : await removeBackgroundClipdrop(item.imageUri);
       // Replace image while preserving all transform properties
-      updateItem(selectedItem.id, { imageUri: resultUri });
-      showSnackbar('Background removed successfully!', 'success');
-    } catch (err: any) {
-      const message = err?.message ?? 'Background removal failed';
-      Alert.alert(
-        mode === 'normal' ? 'Normal Remove Failed' : 'Advanced Remove Failed',
-        message,
-        [{ text: 'OK' }]
-      );
-    } finally {
-      setBgRemoving(null);
+      updateItem(itemId, { imageUri: resultUri, isProcessing: false });
+      return true;
+    } catch (err) {
+      updateItem(itemId, { isProcessing: false });
+      return false;
     }
-  };
+  }, [updateItem]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <View style={[styles.root, { backgroundColor: Colors.bgDark }]}>
+    <View style={styles.root}>
 
       {/* ── Header ── */}
       <View style={[styles.header, { paddingTop: insets.top + 4 }]}>
-        <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.goBack()}>
-          <MaterialCommunityIcons name="arrow-left" size={22} color={Colors.white} />
-        </TouchableOpacity>
+        <IconButton
+          icon="arrow-left" size={40} variant="elevated" iconColor={Colors.white}
+          onPress={() => navigation.goBack()} accessibilityLabel="Go back"
+        />
 
         <Text style={styles.headerTitle} numberOfLines={1}>{projectName}</Text>
 
         <View style={styles.headerRight}>
-          {/* Undo */}
+          <IconButton
+            icon="undo" size={40} variant="elevated" iconColor={Colors.white}
+            onPress={undo} disabled={!undoStack.length} accessibilityLabel="Undo"
+          />
+          <IconButton
+            icon="redo" size={40} variant="elevated" iconColor={Colors.white}
+            onPress={redo} disabled={!redoStack.length} accessibilityLabel="Redo"
+          />
+          {/* Save → auto-saves and opens Preview */}
           <TouchableOpacity
-            style={[styles.iconBtn, !undoStack.length && styles.disabled]}
-            onPress={undo}
-            disabled={!undoStack.length}
+            style={[styles.saveHeaderBtn, saving && styles.disabled]}
+            onPress={handleSaveAndPreview}
+            disabled={saving}
+            accessibilityLabel="Save design"
           >
-            <MaterialCommunityIcons name="undo" size={20} color={undoStack.length ? Colors.white : Colors.textSecondaryDark} />
-          </TouchableOpacity>
-          {/* Redo */}
-          <TouchableOpacity
-            style={[styles.iconBtn, !redoStack.length && styles.disabled]}
-            onPress={redo}
-            disabled={!redoStack.length}
-          >
-            <MaterialCommunityIcons name="redo" size={20} color={redoStack.length ? Colors.white : Colors.textSecondaryDark} />
-          </TouchableOpacity>
-          {/* Save */}
-          <TouchableOpacity style={styles.iconBtn} onPress={() => setSaveDialogVisible(true)}>
-            <MaterialCommunityIcons name="content-save" size={20} color={Colors.white} />
-          </TouchableOpacity>
-          {/* Export */}
-          <TouchableOpacity
-            style={[styles.iconBtn, { backgroundColor: Colors.primary }]}
-            onPress={() => navigation.navigate('Preview')}
-          >
-            <MaterialCommunityIcons name="export-variant" size={20} color={Colors.white} />
+            <MaterialCommunityIcons name="content-save" size={18} color={Colors.white} />
+            <Text style={styles.saveHeaderBtnText}>{saving ? 'Saving…' : 'Save'}</Text>
           </TouchableOpacity>
         </View>
       </View>
 
       {/* ── Canvas Area ── */}
       <View style={styles.canvasArea}>
-        <DecorCanvas onItemSelect={handleItemSelect} />
+        <ViewShot ref={canvasViewRef} options={{ format: 'png', quality: 0.8 }}>
+          <DecorCanvas onItemSelect={handleItemSelect} />
+        </ViewShot>
       </View>
 
-      {/* ── Bottom Panel: Properties or Action Bar ── */}
-      {propertiesOpen && selectedItem ? (
-        <Animated.View style={[styles.propertiesPanel, { height: panelHeight }]}>
-          <View style={styles.panelDragHandle} />
-
-          {/* Decor item thumbnail + label */}
-          <View style={styles.propHeader}>
-            <Image source={{ uri: selectedItem.imageUri }} style={styles.propThumb} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.propTitle}>Selected Item</Text>
-              <Text style={styles.propSub}>Drag on canvas to reposition</Text>
-            </View>
-            <TouchableOpacity onPress={() => selectItem(null)} style={styles.closePropBtn}>
-              <MaterialCommunityIcons name="close" size={20} color={Colors.textSecondaryDark} />
+      {/* ── Bottom Panel: Group Actions, Properties, or Action Bar ── */}
+      {selectedItemIds.length > 0 ? (
+        <View style={styles.groupBar}>
+          <View style={styles.groupBarActions}>
+            <TouchableOpacity style={styles.dupBtn} onPress={duplicateSelected}>
+              <MaterialCommunityIcons name="content-copy" size={18} color={Colors.primary} />
+              <Text style={styles.actionChipTextPrimary}>Duplicate</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.delBtn} onPress={handleGroupDelete}>
+              <MaterialCommunityIcons name="delete" size={18} color={Colors.white} />
+              <Text style={styles.actionChipText}>Delete</Text>
             </TouchableOpacity>
           </View>
+        </View>
+      ) : propertiesOpen && selectedItem ? (
+        /* ── Compact single-item action bar ── */
+        <Animated.View
+          style={[
+            styles.itemActionBar,
+            { opacity: panelAnim, transform: [{ translateY: barTranslate }] },
+          ]}
+        >
+          <TouchableOpacity
+            style={styles.itemActionBtn}
+            onPress={() => navigation.navigate('CropScreen', { itemId: selectedItem.id, imageUri: selectedItem.imageUri })}
+            accessibilityLabel="Crop item"
+            activeOpacity={0.7}
+          >
+            <MaterialCommunityIcons name="crop" size={22} color={Colors.white} />
+            <Text style={styles.itemActionLabel}>Crop</Text>
+          </TouchableOpacity>
 
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.propContent}>
+          <View style={styles.itemActionDivider} />
 
-            {/* Opacity */}
-            <View style={styles.propRow}>
-              <Text style={styles.propLabel}>OPACITY</Text>
-              <Text style={styles.propValue}>{Math.round(selectedItem.opacity * 100)}%</Text>
-            </View>
-            <View style={styles.sliderTrack}>
-              {[0.1, 0.25, 0.5, 0.75, 1].map(val => (
-                <TouchableOpacity
-                  key={val}
-                  style={[styles.sliderChip, selectedItem.opacity === val && styles.sliderChipActive]}
-                  onPress={() => updateItem(selectedItem.id, { opacity: val })}
-                >
-                  <Text style={[styles.sliderChipText, selectedItem.opacity === val && { color: Colors.white }]}>
-                    {Math.round(val * 100)}%
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+          <TouchableOpacity
+            style={styles.itemActionBtn}
+            onPress={duplicateSelected}
+            accessibilityLabel="Duplicate item"
+            activeOpacity={0.7}
+          >
+            <MaterialCommunityIcons name="content-copy" size={22} color={Colors.primary} />
+            <Text style={styles.itemActionLabelPrimary}>Duplicate</Text>
+          </TouchableOpacity>
 
-            {/* Scale */}
-            <View style={styles.propRow}>
-              <Text style={styles.propLabel}>SIZE</Text>
-              <Text style={styles.propValue}>{Math.round(selectedItem.scaleX * 100)}%</Text>
-            </View>
-            <View style={styles.sliderTrack}>
-              {[0.25, 0.5, 0.75, 1, 1.5, 2].map(val => (
-                <TouchableOpacity
-                  key={val}
-                  style={[styles.sliderChip, selectedItem.scaleX === val && styles.sliderChipActive]}
-                  onPress={() => updateItem(selectedItem.id, { scaleX: val, scaleY: val })}
-                >
-                  <Text style={[styles.sliderChipText, selectedItem.scaleX === val && { color: Colors.white }]}>
-                    {Math.round(val * 100)}%
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+          <View style={styles.itemActionDivider} />
 
-            {/* Rotation */}
-            <View style={styles.propRow}>
-              <Text style={styles.propLabel}>ROTATION</Text>
-              <Text style={styles.propValue}>{Math.round(selectedItem.rotation)}°</Text>
-            </View>
-            <View style={styles.sliderTrack}>
-              {[0, 45, 90, 135, 180, 270].map(val => (
-                <TouchableOpacity
-                  key={val}
-                  style={[styles.sliderChip, selectedItem.rotation === val && styles.sliderChipActive]}
-                  onPress={() => updateItem(selectedItem.id, { rotation: val })}
-                >
-                  <Text style={[styles.sliderChipText, selectedItem.rotation === val && { color: Colors.white }]}>
-                    {val}°
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {/* Flip + Lock */}
-            <View style={styles.actionRow}>
-              <TouchableOpacity
-                style={styles.actionChip}
-                onPress={() => updateItem(selectedItem.id, { isFlippedH: !selectedItem.isFlippedH })}
-              >
-                <MaterialCommunityIcons name="flip-horizontal" size={16} color={Colors.white} />
-                <Text style={styles.actionChipText}>Flip H</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.actionChip}
-                onPress={() => updateItem(selectedItem.id, { isFlippedV: !selectedItem.isFlippedV })}
-              >
-                <MaterialCommunityIcons name="flip-vertical" size={16} color={Colors.white} />
-                <Text style={styles.actionChipText}>Flip V</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.actionChip}
-                onPress={bringForward}
-              >
-                <MaterialCommunityIcons name="arrange-bring-forward" size={16} color={Colors.white} />
-                <Text style={styles.actionChipText}>Forward</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.actionChip}
-                onPress={sendBackward}
-              >
-                <MaterialCommunityIcons name="arrange-send-backward" size={16} color={Colors.white} />
-                <Text style={styles.actionChipText}>Backward</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* ── Background Removal ── */}
-            <View style={styles.bgRemoveSection}>
-              <Text style={styles.propLabel}>BACKGROUND REMOVAL</Text>
-              <View style={styles.bgRemoveRow}>
-                {/* Normal Remove */}
-                <TouchableOpacity
-                  style={[
-                    styles.bgBtn,
-                    styles.bgBtnNormal,
-                    bgRemoving !== null && styles.bgBtnDisabled,
-                  ]}
-                  onPress={() => handleRemoveBackground('normal')}
-                  disabled={bgRemoving !== null}
-                  activeOpacity={0.8}
-                >
-                  {bgRemoving === 'normal' ? (
-                    <ActivityIndicator size="small" color={Colors.success} />
-                  ) : (
-                    <MaterialCommunityIcons name="eraser" size={18} color={Colors.success} />
-                  )}
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.bgBtnTitle, { color: Colors.success }]}>
-                      {bgRemoving === 'normal' ? 'Removing…' : 'Normal Remove'}
-                    </Text>
-                    <Text style={styles.bgBtnSub}>Free · On-device</Text>
-                  </View>
-                </TouchableOpacity>
-
-                {/* Advanced Remove */}
-                <TouchableOpacity
-                  style={[
-                    styles.bgBtn,
-                    styles.bgBtnAdvanced,
-                    bgRemoving !== null && styles.bgBtnDisabled,
-                  ]}
-                  onPress={() => handleRemoveBackground('advanced')}
-                  disabled={bgRemoving !== null}
-                  activeOpacity={0.8}
-                >
-                  {bgRemoving === 'advanced' ? (
-                    <ActivityIndicator size="small" color={Colors.primary} />
-                  ) : (
-                    <MaterialCommunityIcons name="auto-fix" size={18} color={Colors.primary} />
-                  )}
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.bgBtnTitle, { color: Colors.primary }]}>
-                      {bgRemoving === 'advanced' ? 'Processing…' : 'Advanced Remove'}
-                    </Text>
-                    <Text style={styles.bgBtnSub}>HD · Clipdrop AI</Text>
-                  </View>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {/* Delete / Duplicate */}
-            <View style={styles.dangerRow}>
-              <TouchableOpacity
-                style={styles.dupBtn}
-                onPress={duplicateSelected}
-              >
-                <MaterialCommunityIcons name="content-copy" size={18} color={Colors.primary} />
-                <Text style={[styles.actionChipText, { color: Colors.primary }]}>Duplicate</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.delBtn}
-                onPress={handleDelete}
-              >
-                <MaterialCommunityIcons name="delete" size={18} color={Colors.white} />
-                <Text style={styles.actionChipText}>Delete</Text>
-              </TouchableOpacity>
-            </View>
-          </ScrollView>
+          <TouchableOpacity
+            style={styles.itemActionBtn}
+            onPress={handleDelete}
+            accessibilityLabel="Delete item"
+            activeOpacity={0.7}
+          >
+            <MaterialCommunityIcons name="delete-outline" size={22} color={Colors.error} />
+            <Text style={styles.itemActionLabelError}>Delete</Text>
+          </TouchableOpacity>
         </Animated.View>
       ) : (
         /* ── Bottom Action Bar ── */
-        <View style={styles.bottomBar}>
-          {/* Change room image */}
-          <View style={styles.bottomSection}>
-            <Text style={styles.bottomLabel}>ROOM PHOTO</Text>
-            <View style={styles.bottomBtns}>
-              <TouchableOpacity style={styles.bottomBtn} onPress={handleChangeRoomFromCamera}>
-                <MaterialCommunityIcons name="camera" size={20} color={Colors.white} />
-                <Text style={styles.bottomBtnText}>Camera</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.bottomBtn} onPress={handleChangeRoomFromGallery}>
-                <MaterialCommunityIcons name="image" size={20} color={Colors.white} />
-                <Text style={styles.bottomBtnText}>Gallery</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          <View style={styles.vertDivider} />
-
-          {/* Add decor items */}
-          <View style={styles.bottomSection}>
-            <Text style={styles.bottomLabel}>ADD DECOR ITEM</Text>
-            <View style={styles.bottomBtns}>
-              <TouchableOpacity style={[styles.bottomBtn, styles.addBtn]} onPress={addDecorFromCamera}>
-                <MaterialCommunityIcons name="camera-plus" size={20} color={Colors.white} />
-                <Text style={styles.bottomBtnText}>Camera</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.bottomBtn, styles.addBtn]} onPress={addDecorFromGallery}>
-                <MaterialCommunityIcons name="image-plus" size={20} color={Colors.white} />
-                <Text style={styles.bottomBtnText}>Gallery</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
+        <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, Spacing.md) }]}>
+          <OutlineButton
+            label="Change Room"
+            icon="image-edit-outline"
+            variant="neutral"
+            onPress={() => setPickerFor('room')}
+            accessibilityLabel="Change room photo"
+            style={styles.roomBtn}
+          />
+          <GradientButton
+            label="Add Décor"
+            icon="plus-circle"
+            onPress={() => setPickerFor('decor')}
+            accessibilityLabel="Add decor item"
+            paddingVertical={Spacing.md}
+            style={styles.addDecorBtn}
+          />
         </View>
       )}
 
-      {/* Footer */}
-      <AppFooter />
+      {/* Source picker sheet */}
+      <Modal
+        visible={pickerFor !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPickerFor(null)}
+      >
+        <TouchableOpacity
+          style={styles.sheetOverlay}
+          activeOpacity={1}
+          onPress={() => setPickerFor(null)}
+        >
+          <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, Spacing.lg) }]}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle}>
+              {pickerFor === 'decor' ? 'Add a décor item' : 'Change room photo'}
+            </Text>
+            <Text style={styles.sheetSub}>
+              {pickerFor === 'decor'
+                ? 'Its background is removed automatically.'
+                : 'Choose the room you want to decorate.'}
+            </Text>
+
+            <TouchableOpacity style={styles.sheetOption} onPress={() => handlePickSource('camera')} activeOpacity={0.85}>
+              <View style={styles.sheetIcon}>
+                <MaterialCommunityIcons name="camera" size={22} color={Colors.primary} />
+              </View>
+              <View style={styles.sheetOptTextWrap}>
+                <Text style={styles.sheetOptTitle}>Take a Photo</Text>
+                <Text style={styles.sheetOptSub}>Use your camera</Text>
+              </View>
+              <MaterialCommunityIcons name="chevron-right" size={22} color={Colors.textSecondaryDark} />
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.sheetOption} onPress={() => handlePickSource('gallery')} activeOpacity={0.85}>
+              <View style={styles.sheetIcon}>
+                <MaterialCommunityIcons name="image-multiple" size={22} color={Colors.primary} />
+              </View>
+              <View style={styles.sheetOptTextWrap}>
+                <Text style={styles.sheetOptTitle}>Choose from Gallery</Text>
+                <Text style={styles.sheetOptSub}>Pick an existing photo</Text>
+              </View>
+              <MaterialCommunityIcons name="chevron-right" size={22} color={Colors.textSecondaryDark} />
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {/* Snackbar */}
       <SnackbarNotification />
-
-      {/* Save Modal */}
-      <Modal visible={saveDialogVisible} transparent animationType="fade" onRequestClose={() => setSaveDialogVisible(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.saveDialog}>
-            <Text style={styles.dialogTitle}>Save Design</Text>
-            <Text style={styles.dialogSub}>Give your design a name</Text>
-            <TextInput
-              style={styles.nameInput}
-              value={projectName}
-              onChangeText={setProjectName}
-              placeholder="e.g. Living Room 2026"
-              placeholderTextColor={Colors.textSecondaryDark}
-              autoFocus
-              selectTextOnFocus
-            />
-            <View style={styles.dialogBtns}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => setSaveDialogVisible(false)}>
-                <Text style={styles.cancelBtnText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
-                <LinearGradient colors={[Colors.primary, Colors.primaryDark]} style={styles.saveBtnInner} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}>
-                  <Text style={styles.saveBtnText}>Save</Text>
-                </LinearGradient>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 };
@@ -543,7 +492,7 @@ const EditorScreen: React.FC<Props> = ({ navigation, route }) => {
 // ── Styles ─────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
+  root: { flex: 1, backgroundColor: Colors.bgDark },
 
   header: {
     flexDirection: 'row',
@@ -557,187 +506,128 @@ const styles = StyleSheet.create({
   },
   headerTitle: { ...Typography.bodyMedium, color: Colors.white, flex: 1, textAlign: 'center' },
   headerRight: { flexDirection: 'row', gap: 4 },
-  iconBtn: {
-    padding: Spacing.sm,
-    borderRadius: BorderRadius.md,
-    backgroundColor: Colors.surfaceElevatedDark,
-  },
   disabled: { opacity: 0.4 },
 
   canvasArea: {
     flex: 1,
     justifyContent: 'center',
+    alignItems: 'center',  // ← hug the canvas width so ViewShot doesn't capture extra side margin
     paddingVertical: Spacing.sm,
     overflow: 'hidden',   // ← prevents canvas items bleeding into header
   },
 
-  // Bottom Action Bar
-  bottomBar: {
+  // Group selection bar
+  groupBar: {
     flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: Colors.surfaceDark,
     borderTopWidth: 1,
     borderTopColor: Colors.borderDark,
     paddingVertical: Spacing.md,
     paddingHorizontal: Spacing.lg,
-    gap: Spacing.lg,
   },
-  bottomSection: { flex: 1, gap: Spacing.xs },
-  bottomLabel: { ...Typography.caption, color: Colors.textSecondaryDark, letterSpacing: 0.8 },
-  bottomBtns: { flexDirection: 'row', gap: Spacing.sm },
-  bottomBtn: {
-    flex: 1,
+  groupBarActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+
+  // Bottom Action Bar
+  bottomBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-    paddingVertical: Spacing.sm,
-    borderRadius: BorderRadius.lg,
-    backgroundColor: Colors.surfaceElevatedDark,
-    borderWidth: 1,
-    borderColor: Colors.borderDark,
-  },
-  addBtn: {
-    backgroundColor: Colors.primary + '25',
-    borderColor: Colors.primary + '60',
-  },
-  bottomBtnText: { ...Typography.caption, color: Colors.white },
-  vertDivider: { width: 1, backgroundColor: Colors.borderDark },
-
-  // Properties Panel
-  propertiesPanel: {
     backgroundColor: Colors.surfaceDark,
     borderTopWidth: 1,
     borderTopColor: Colors.borderDark,
-    borderTopLeftRadius: BorderRadius.xl,
-    borderTopRightRadius: BorderRadius.xl,
-    overflow: 'hidden',
-  },
-  panelDragHandle: {
-    width: 36, height: 4, backgroundColor: Colors.borderDark,
-    borderRadius: 2, alignSelf: 'center', marginTop: Spacing.sm, marginBottom: 4,
-  },
-  propHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    paddingTop: Spacing.md,
     paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.sm,
     gap: Spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.borderDark,
   },
-  propThumb: {
-    width: 48, height: 48, borderRadius: BorderRadius.md,
-    backgroundColor: Colors.surfaceElevatedDark,
-  },
-  propTitle: { ...Typography.bodyMedium, color: Colors.white },
-  propSub: { ...Typography.caption, color: Colors.textSecondaryDark },
-  closePropBtn: { padding: Spacing.xs },
-  propContent: { padding: Spacing.lg, paddingTop: Spacing.md, gap: Spacing.md },
+  roomBtn: { paddingHorizontal: Spacing.lg },
+  addDecorBtn: { flex: 1 },
 
-  propRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  propLabel: { ...Typography.caption, color: Colors.textSecondaryDark, letterSpacing: 0.8 },
-  propValue: { ...Typography.label, color: Colors.primary },
-
-  sliderTrack: { flexDirection: 'row', gap: Spacing.xs, flexWrap: 'wrap' },
-  sliderChip: {
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.xs,
-    borderRadius: BorderRadius.full,
-    backgroundColor: Colors.surfaceElevatedDark,
-    borderWidth: 1,
-    borderColor: Colors.borderDark,
-  },
-  sliderChipActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
-  sliderChipText: { ...Typography.caption, color: Colors.textSecondaryDark },
-
-  actionRow: { flexDirection: 'row', gap: Spacing.sm, flexWrap: 'wrap' },
-  actionChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    borderRadius: BorderRadius.lg,
-    backgroundColor: Colors.surfaceElevatedDark,
-    borderWidth: 1,
-    borderColor: Colors.borderDark,
-  },
-  actionChipText: { ...Typography.caption, color: Colors.white },
-
-  // BG Removal
-  bgRemoveSection: { gap: Spacing.xs },
-  bgRemoveRow: { flexDirection: 'row', gap: Spacing.sm },
-  bgBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
+  // Source picker sheet
+  sheetOverlay: { flex: 1, backgroundColor: Colors.overlay, justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: Colors.surfaceDark,
+    borderTopLeftRadius: BorderRadius.xxl,
+    borderTopRightRadius: BorderRadius.xxl,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.md,
     gap: Spacing.sm,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    borderRadius: BorderRadius.lg,
-    borderWidth: 1,
   },
-  bgBtnNormal: {
-    backgroundColor: Colors.success + '15',
-    borderColor: Colors.success + '50',
+  sheetHandle: {
+    width: 40, height: 4, borderRadius: 2,
+    backgroundColor: Colors.borderDark, alignSelf: 'center', marginBottom: Spacing.md,
   },
-  bgBtnAdvanced: {
-    backgroundColor: Colors.primary + '15',
-    borderColor: Colors.primary + '50',
+  sheetTitle: { ...Typography.h3, color: Colors.textPrimaryDark },
+  sheetSub: { ...Typography.body, color: Colors.textSecondaryDark, marginBottom: Spacing.sm },
+  sheetOption: {
+    flexDirection: 'row', alignItems: 'center', gap: Spacing.md,
+    backgroundColor: Colors.surfaceElevatedDark,
+    borderRadius: BorderRadius.xl, padding: Spacing.md,
+    borderWidth: 1, borderColor: Colors.borderDark,
   },
-  bgBtnDisabled: { opacity: 0.45 },
-  bgBtnTitle: { ...Typography.caption, fontWeight: '600' },
-  bgBtnSub: { ...Typography.caption, color: Colors.textSecondaryDark, fontSize: 9, opacity: 0.8 },
+  sheetIcon: {
+    width: 44, height: 44, borderRadius: BorderRadius.lg,
+    backgroundColor: Colors.primary + '1F',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  sheetOptTextWrap: { flex: 1 },
+  sheetOptTitle: { ...Typography.bodyMedium, color: Colors.textPrimaryDark },
+  sheetOptSub: { ...Typography.caption, color: Colors.textSecondaryDark, marginTop: 1 },
 
-  dangerRow: { flexDirection: 'row', gap: Spacing.sm },
+  // Compact single-item action bar
+  itemActionBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'center',
+    marginBottom: Spacing.md,
+    backgroundColor: Colors.surfaceDark,
+    borderRadius: BorderRadius.full,
+    borderWidth: 1,
+    borderColor: Colors.borderDark,
+    paddingHorizontal: Spacing.xs,
+    ...Shadow.lg,
+  },
+  itemActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+  },
+  itemActionLabel: { ...Typography.label, color: Colors.white },
+  itemActionLabelPrimary: { ...Typography.label, color: Colors.primary },
+  itemActionLabelError: { ...Typography.label, color: Colors.error },
+  itemActionDivider: { width: 1, height: 24, backgroundColor: Colors.borderDark },
+
+  // Group selection action buttons (multi-select)
+  actionChipText: { ...Typography.caption, color: Colors.white },
+  actionChipTextPrimary: { ...Typography.caption, color: Colors.primary },
   dupBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 6, paddingVertical: Spacing.md,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6, paddingVertical: Spacing.md, paddingHorizontal: Spacing.xl,
     borderRadius: BorderRadius.xl,
     backgroundColor: Colors.primary + '15',
     borderWidth: 1, borderColor: Colors.primary + '50',
   },
   delBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 6, paddingVertical: Spacing.md,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6, paddingVertical: Spacing.md, paddingHorizontal: Spacing.xl,
     borderRadius: BorderRadius.xl,
     backgroundColor: Colors.error + '20',
     borderWidth: 1, borderColor: Colors.error + '60',
   },
 
-  // Modal
-  modalOverlay: {
-    flex: 1, backgroundColor: Colors.overlay,
-    alignItems: 'center', justifyContent: 'center',
+  // Save button (header)
+  saveHeaderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    borderRadius: BorderRadius.md,
+    backgroundColor: Colors.primary,
   },
-  saveDialog: {
-    backgroundColor: Colors.surfaceDark,
-    borderRadius: BorderRadius.xl,
-    padding: Spacing.xl,
-    width: '85%',
-    borderWidth: 1,
-    borderColor: Colors.borderDark,
-    ...Shadow.lg,
-  },
-  dialogTitle: { ...Typography.h3, color: Colors.white, marginBottom: 4 },
-  dialogSub: { ...Typography.body, color: Colors.textSecondaryDark, marginBottom: Spacing.lg },
-  nameInput: {
-    ...Typography.body, color: Colors.white,
-    backgroundColor: Colors.surfaceElevatedDark,
-    borderRadius: BorderRadius.lg,
-    paddingHorizontal: Spacing.lg, paddingVertical: Spacing.md,
-    borderWidth: 1, borderColor: Colors.primary + '60',
-    marginBottom: Spacing.lg,
-  },
-  dialogBtns: { flexDirection: 'row', gap: Spacing.md },
-  cancelBtn: {
-    flex: 1, paddingVertical: Spacing.md, alignItems: 'center',
-    borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.borderDark,
-  },
-  cancelBtnText: { ...Typography.bodyMedium, color: Colors.textSecondaryDark },
-  saveBtn: { flex: 1, borderRadius: BorderRadius.lg, overflow: 'hidden' },
-  saveBtnInner: { paddingVertical: Spacing.md, alignItems: 'center' },
-  saveBtnText: { ...Typography.bodyMedium, color: Colors.white },
+  saveHeaderBtnText: { ...Typography.bodyMedium, color: Colors.white },
 });
 
 export default EditorScreen;

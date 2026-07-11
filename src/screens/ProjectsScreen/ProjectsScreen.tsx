@@ -17,6 +17,9 @@ import { useCanvasStore } from '../../store/canvasStore';
 import { useUIStore } from '../../store/uiStore';
 import { Project } from '../../types/canvas.types';
 import { SnackbarNotification } from '../../components/SnackbarNotification';
+import { IconButton } from '../../components/common/IconButton';
+import { GradientButton } from '../../components/common/GradientButton';
+import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../../constants';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const CARD_W = (SCREEN_W - Spacing.lg * 2 - Spacing.md) / 2;
@@ -64,7 +67,6 @@ const ProjectsScreen: React.FC<Props> = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             await deleteProject(project.id);
-            showSnackbar('Design deleted', 'info');
           },
         },
       ]
@@ -96,29 +98,31 @@ const ProjectsScreen: React.FC<Props> = ({ navigation }) => {
         </LinearGradient>
       )}
 
-      {/* Info */}
-      <View style={styles.cardInfo}>
-        <Text style={styles.cardName} numberOfLines={2}>{item.name}</Text>
-        <Text style={styles.cardMeta}>{item.itemCount} items</Text>
-        <Text style={styles.cardDate}>{new Date(item.updatedAt).toLocaleDateString()}</Text>
-      </View>
+      {/* Name overlay */}
+      <LinearGradient
+        colors={['transparent', 'rgba(0,0,0,0.8)']}
+        style={styles.nameOverlay}
+        pointerEvents="none"
+      >
+        <Text style={styles.cardName} numberOfLines={1}>{item.name}</Text>
+      </LinearGradient>
 
-      {/* Action buttons */}
-      <View style={styles.cardActions}>
-        <TouchableOpacity
-          onPress={() => handleDeleteProject(item)}
-          hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-        >
-          <MaterialCommunityIcons name="delete-outline" size={18} color={Colors.error + 'A0'} />
-        </TouchableOpacity>
-      </View>
+      {/* Delete button */}
+      <TouchableOpacity
+        style={styles.cardActions}
+        onPress={() => handleDeleteProject(item)}
+        hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+        accessibilityLabel="Delete design"
+      >
+        <MaterialCommunityIcons name="delete-outline" size={18} color={Colors.white} />
+      </TouchableOpacity>
     </TouchableOpacity>
   );
 
   return (
     <View style={styles.root}>
       <LinearGradient
-        colors={['#0F0F1A', '#1A1A2E']}
+        colors={[Colors.gradientStart, Colors.gradientEnd]}
         style={StyleSheet.absoluteFillObject}
       />
 
@@ -126,26 +130,24 @@ const ProjectsScreen: React.FC<Props> = ({ navigation }) => {
 
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity
-            style={styles.backBtn}
-            onPress={() => navigation.goBack()}
-            accessibilityLabel="Go back"
-          >
-            <MaterialCommunityIcons name="arrow-left" size={22} color={Colors.white} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>My Designs</Text>
-          <TouchableOpacity
-            style={styles.newBtn}
+          <IconButton icon="arrow-left" onPress={() => navigation.goBack()} accessibilityLabel="Go back" />
+          <View style={styles.flexFill}>
+            <Text style={styles.headerTitle}>My Designs</Text>
+            <Text style={styles.headerSub}>
+              {projects.length} {projects.length === 1 ? 'design' : 'designs'} saved
+            </Text>
+          </View>
+          <IconButton
+            icon="plus"
+            variant="filled"
             onPress={handleNewDesign}
             accessibilityLabel="Create new design"
-          >
-            <MaterialCommunityIcons name="plus" size={22} color={Colors.white} />
-          </TouchableOpacity>
+          />
         </View>
 
         {/* Search */}
         <View style={styles.searchContainer}>
-          <MaterialCommunityIcons name="magnify" size={18} color={Colors.textSecondaryDark} />
+          <MaterialCommunityIcons name="magnify" size={20} color={Colors.textSecondaryDark} />
           <TextInput
             style={styles.searchInput}
             placeholder="Search designs..."
@@ -168,24 +170,26 @@ const ProjectsScreen: React.FC<Props> = ({ navigation }) => {
           />
         ) : (
           <View style={styles.emptyState}>
-            <MaterialCommunityIcons name="folder-open" size={64} color={Colors.borderDark} />
+            <View style={styles.emptyIconWrap}>
+              <MaterialCommunityIcons name="image-multiple-outline" size={44} color={Colors.primary} />
+            </View>
             <Text style={styles.emptyTitle}>
-              {searchQuery ? 'No results found' : 'No saved designs'}
+              {searchQuery ? 'No results found' : 'No saved designs yet'}
             </Text>
             <Text style={styles.emptySubtitle}>
               {searchQuery ? 'Try a different search' : 'Create your first design from the home screen'}
             </Text>
             {!searchQuery && (
-              <TouchableOpacity style={styles.createBtn} onPress={handleNewDesign}>
-                <LinearGradient
-                  colors={[Colors.primary, Colors.primaryDark]}
-                  style={styles.createBtnInner}
-                  start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
-                >
-                  <MaterialCommunityIcons name="plus" size={20} color={Colors.white} />
-                  <Text style={styles.createBtnText}>New Design</Text>
-                </LinearGradient>
-              </TouchableOpacity>
+              <GradientButton
+                label="New Design"
+                icon="plus"
+                iconSize={20}
+                onPress={handleNewDesign}
+                radius={BorderRadius.xl}
+                textVariant="bodyMedium"
+                shadow={false}
+                style={styles.createBtn}
+              />
             )}
           </View>
         )}
@@ -199,31 +203,17 @@ const ProjectsScreen: React.FC<Props> = ({ navigation }) => {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: Colors.bgDark },
   safe: { flex: 1 },
+  flexFill: { flex: 1 },
 
   header: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: Spacing.md,
     paddingHorizontal: Spacing.lg,
     paddingVertical: Spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.borderDark,
   },
-  backBtn: {
-    padding: Spacing.xs,
-    borderRadius: BorderRadius.md,
-    backgroundColor: Colors.surfaceElevatedDark,
-    width: 44,
-    alignItems: 'center',
-  },
-  headerTitle: { ...Typography.h3, color: Colors.white, flex: 1, textAlign: 'center' },
-  newBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: BorderRadius.md,
-    backgroundColor: Colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  headerTitle: { ...Typography.h2, color: Colors.textPrimaryDark },
+  headerSub: { ...Typography.caption, color: Colors.textSecondaryDark, marginTop: 1 },
 
   searchContainer: {
     flexDirection: 'row',
@@ -252,22 +242,25 @@ const styles = StyleSheet.create({
 
   card: {
     width: CARD_W,
-    backgroundColor: Colors.surfaceDark,
+    aspectRatio: CANVAS_WIDTH / CANVAS_HEIGHT,
     borderRadius: BorderRadius.xl,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: Colors.borderDark,
+    backgroundColor: Colors.surfaceDark,
     ...Shadow.sm,
   },
-  cardThumb: { width: '100%', height: 120 },
+  cardThumb: { width: '100%', height: '100%' },
   cardThumbPlaceholder: {
-    width: '100%', height: 120,
+    width: '100%', height: '100%',
     alignItems: 'center', justifyContent: 'center',
   },
-  cardInfo: { padding: Spacing.md, flex: 1 },
-  cardName: { ...Typography.bodyMedium, color: Colors.white, marginBottom: 4 },
-  cardMeta: { ...Typography.caption, color: Colors.primary, marginBottom: 2 },
-  cardDate: { ...Typography.caption, color: Colors.textSecondaryDark },
+  nameOverlay: {
+    position: 'absolute',
+    left: 0, right: 0, bottom: 0,
+    paddingHorizontal: Spacing.sm,
+    paddingTop: Spacing.lg,
+    paddingBottom: Spacing.sm,
+  },
+  cardName: { ...Typography.label, color: Colors.white },
   cardActions: {
     position: 'absolute',
     top: Spacing.sm,
@@ -284,17 +277,15 @@ const styles = StyleSheet.create({
     padding: Spacing.xxl,
     gap: Spacing.md,
   },
-  emptyTitle: { ...Typography.h3, color: Colors.white, textAlign: 'center' },
-  emptySubtitle: { ...Typography.body, color: Colors.textSecondaryDark, textAlign: 'center', lineHeight: 24 },
-  createBtn: { borderRadius: BorderRadius.xl, overflow: 'hidden', marginTop: Spacing.md },
-  createBtnInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
-    paddingHorizontal: Spacing.xl,
-    paddingVertical: Spacing.lg,
+  emptyIconWrap: {
+    width: 96, height: 96, borderRadius: BorderRadius.xxl,
+    backgroundColor: Colors.primary + '18',
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: Spacing.sm,
   },
-  createBtnText: { ...Typography.bodyMedium, color: Colors.white },
+  emptyTitle: { ...Typography.h3, color: Colors.textPrimaryDark, textAlign: 'center' },
+  emptySubtitle: { ...Typography.body, color: Colors.textSecondaryDark, textAlign: 'center', lineHeight: 24 },
+  createBtn: { marginTop: Spacing.md },
 });
 
 export default ProjectsScreen;

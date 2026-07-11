@@ -1,11 +1,13 @@
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../types/navigation.types';
+import { Colors } from '../theme/colors';
 
 import HomeScreen from '../screens/HomeScreen/HomeScreen';
 import EditorScreen from '../screens/EditorScreen/EditorScreen';
 import PreviewScreen from '../screens/PreviewScreen/PreviewScreen';
 import ProjectsScreen from '../screens/ProjectsScreen/ProjectsScreen';
+import CropScreen from '../screens/CropScreen/CropScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -16,7 +18,7 @@ export const AppNavigator: React.FC = () => {
       screenOptions={{
         headerShown: false,
         animation: 'slide_from_right',
-        contentStyle: { backgroundColor: '#0F0F1A' },
+        contentStyle: { backgroundColor: Colors.bgDark },
       }}
     >
       <Stack.Screen name="Home" component={HomeScreen} />
@@ -31,6 +33,11 @@ export const AppNavigator: React.FC = () => {
         options={{ animation: 'fade' }}
       />
       <Stack.Screen name="Projects" component={ProjectsScreen} />
+      <Stack.Screen
+        name="CropScreen"
+        component={CropScreen}
+        options={{ animation: 'slide_from_bottom', gestureEnabled: false }}
+      />
     </Stack.Navigator>
   );
 };

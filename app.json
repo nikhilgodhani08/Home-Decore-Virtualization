@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "Bapasitaram home decore & gift",
-    "slug": "bapasitaram-home-decore",
+    "name": "Home Decor Visualization",
+    "slug": "home-decor-visualization",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -9,17 +9,17 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#1a1a2e"
+      "backgroundColor": "#0D0D0D"
     },
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.bapasitaram.homedecor",
-      "displayName": "Bapasitaram home decore & gift"
+      "displayName": "Home Decor Visualization"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#3B82F6"
+        "backgroundColor": "#D4AF37"
       },
       "package": "com.bapasitaram.homedecor",
       "permissions": [
@@ -54,7 +54,8 @@
           "isAccessMediaLocationEnabled": true
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      "expo-font"
     ],
     "extra": {
       "eas": {

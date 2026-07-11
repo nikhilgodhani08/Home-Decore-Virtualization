@@ -9,8 +9,7 @@
 import { File, Paths } from 'expo-file-system';
 import * as LegacyFileSystem from 'expo-file-system/legacy';
 // ── Config ────────────────────────────────────────────────────────────────────
-const CLIPDROP_API_KEY =
-  'bb51f90e3cee89c24e92df60527cb6085272232dbb61a3b0d52d14f16dc59633d83d6ecf7a988d76bd0b8570de05f9bc';
+const CLIPDROP_API_KEY = process.env.EXPO_PUBLIC_CLIPDROP_API_KEY;
 
 const CLIPDROP_URL = 'https://clipdrop-api.co/remove-background/v1';
 
@@ -53,6 +52,11 @@ export async function removeBackgroundLocal(
 export async function removeBackgroundClipdrop(
   imageUri: string
 ): Promise<string> {
+  if (!CLIPDROP_API_KEY) {
+    throw new Error(
+      'Clipdrop API key is not configured. Set EXPO_PUBLIC_CLIPDROP_API_KEY in your .env file.'
+    );
+  }
 
   // ✅ Convert content:// → file:// (important for Android)
   if (imageUri.startsWith('content://')) {
@@ -85,11 +89,7 @@ export async function removeBackgroundClipdrop(
   });
 
   if (!response.ok) {
-    const errText = await response.text();
-    console.log('Clipdrop Error:', response.status, errText);
-    throw new Error(
-      `Clipdrop API error (${response.status}): ${errText}`
-    );
+    throw new Error(`Clipdrop API error (${response.status})`);
   }
 
   // ✅ Get binary response
