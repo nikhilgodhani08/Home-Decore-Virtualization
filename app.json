@@ -19,7 +19,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#D4AF37"
+        "backgroundColor": "#121214"
       },
       "package": "com.bapasitaram.homedecor",
       "permissions": [
@@ -59,8 +59,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "d31bde47-d78f-4180-ad37-7efabcbe6367"
+        "projectId": "32eda90e-69c1-421d-bf02-fc6bdfc491f5"
       }
-    }
+    },
+    "owner": "nikhil888"
   }
 }
