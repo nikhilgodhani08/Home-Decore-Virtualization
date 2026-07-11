@@ -57,11 +57,11 @@
       "expo-sqlite",
       "expo-font"
     ],
+    "owner": "nikhil888",
     "extra": {
       "eas": {
-        "projectId": "32eda90e-69c1-421d-bf02-fc6bdfc491f5"
+        "projectId": "4ec7a36e-a120-4491-a42a-be7006b55ced"
       }
-    },
-    "owner": "nikhil888"
+    }
   }
 }
